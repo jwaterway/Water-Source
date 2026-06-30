@@ -21,19 +21,41 @@ const SHOP_X = 120;
 const SHOP_Y = 80;
 const SHOP_RADIUS = 50;
 const WELL_COST = 2000;
-const CONTAM_HEALTH_PENALTY = 0.039;
+const MOBILE_VIEW_W = 460;
+const MOBILE_VIEW_H = 700;
 const CONTAM_WATER_PENALTY = 0.18;
+const DIRTY_STATUS_HEALTH_MULTIPLIER = 3;
 const RAIN_WELL_FILL_RATE = 0.4;   // per second
 const DROUGHT_WELL_DRAIN_RATE = 0.75;
 const RAIN_RIVER_FILL_RATE = 0.25;
 const DROUGHT_RIVER_DRAIN_RATE = 0.5;
 
+const SFX_DROUGHT_WIND = "/sfx/dragon-studio-eerie-wind-478386.mp3";
+const SFX_RAIN_THUNDER = "/sfx/freesound_community-thunder-during-rainstorm-1-72024.mp3";
+const SFX_WELL_FILL = "/sfx/a_a2005-flowing-water-345171.wav";
+const SFX_CLEAN_DELIVERY = "/sfx/universfield-water-splash-02-352021.mp3";
+const SFX_DIRTY_HOOK = "/sfx/warp3.wav";
+const SFX_DIRTY_DELIVERY = "/sfx/freesound_community-dirt-pound-107984.mp3";
+const SFX_BG_MUSIC = "/sfx/freesound_community-slow-ethereal-sequencer-music-fragment-50247.mp3";
+
+const CW = {
+  yellow: "#FFC907",
+  navy: "#003366",
+  blue: "#77A8BB",
+  cream: "#FFF7E1",
+  black: "#1A1A1A",
+  tint: "#F7F3EA",
+  peach: "#FED8C1",
+  orange: "#BF6C46",
+  gray: "#CBCDD1",
+};
+
 // --- Upgrades ---
 export interface Upgrade { id: string; name: string; description: string; cost: number; icon: string; }
 export const UPGRADES: Upgrade[] = [
   { id: "filter",  name: "Water Filter",    description: "Purifies brown water — safe collection", cost: 80,  icon: "🔵" },
-  { id: "jug1",   name: "Bigger Jug I",    description: "+50 water capacity",                     cost: 120, icon: "🪣" },
-  { id: "jug2",   name: "Bigger Jug II",   description: "+100 water capacity (req. Jug I)",        cost: 280, icon: "🛢" },
+  { id: "jug1",   name: "Jerry Can I",     description: "+50 water capacity",                     cost: 120, icon: "⛽" },
+  { id: "jug2",   name: "Jerry Can II",    description: "+100 water capacity (req. Jerry Can I)",  cost: 280, icon: "⛽+" },
   { id: "speed1", name: "Sprint Boots I",  description: "+40% move speed",                         cost: 150, icon: "👟" },
   { id: "speed2", name: "Sprint Boots II", description: "+80% move speed (req. Boots I)",          cost: 350, icon: "🥾" },
   { id: "health1",name: "Canteen",         description: "Slower health drain (-45%)",              cost: 200, icon: "🧃" },
@@ -80,6 +102,14 @@ interface GameState {
   lastRippleId: number; lastDustId: number; lastFloatId: number;
 }
 
+interface WeekSummary {
+  week: number;
+  populationGain: number;
+  fundsRaised: number;
+  goodWaterCollected: number;
+  badWaterCollected: number;
+}
+
 // --- Helpers ---
 function computeMaxWater(u: Set<string>) { let w = BASE_MAX_WATER; if (u.has("jug1")) w += 50; if (u.has("jug2")) w += 100; return w; }
 function computeSpeed(u: Set<string>) { let s = BASE_SPEED; if (u.has("speed1")) s *= 1.4; if (u.has("speed2")) s *= 1.8; return s; }
@@ -111,11 +141,22 @@ function generateSources(day: number, builtWells: Array<{ x: number; y: number }
   const count = WATER_SOURCE_COUNT + Math.min(day - 1, 3);
   for (let i = 0; i < count; i++) {
     let x: number, y: number; let attempts = 0;
-    do { x = 60 + Math.random() * (WORLD_W - 120); y = 60 + Math.random() * (WORLD_H - 120); attempts++; }
-    while (attempts < 30 && avoid.some(z => Math.hypot(x - z.x, y - z.y) < z.r));
+    do {
+      x = 60 + Math.random() * (WORLD_W - 120);
+      y = 60 + Math.random() * (WORLD_H - 120);
+      attempts++;
+    } while (
+      attempts < 60 && (
+        avoid.some(z => Math.hypot(x - z.x, y - z.y) < z.r) ||
+        builtWells.some(w => Math.hypot(x - w.x, y - w.y) < 72) ||
+        sources.some(src => Math.hypot(x - src.x, y - src.y) < 68)
+      )
+    );
+    if (attempts >= 60) continue;
     const type = types[Math.floor(Math.random() * types.length)];
     const maxAmount = type === "river" ? 80 : type === "well" ? 50 : 25;
-    const contaminated = Math.random() < (type === "river" ? 0.4 : 0.3);
+    // Wells are visually and behaviorally consistent: brown wells are always dirty, blue wells are clean.
+    const contaminated = type === "well" ? Math.random() < 0.5 : Math.random() < (type === "river" ? 0.4 : 0.3);
     sources.push({ id: i, x, y, amount: maxAmount, maxAmount, type, contaminated });
   }
   builtWells.forEach((w, idx) => {
@@ -167,16 +208,16 @@ function initState(prev?: GameState): GameState {
 
 // ─── DRAW HELPERS ─────────────────────────────────────────────────────────────
 
-function drawPixelText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size = 10, color = "#e8d5a3", align: CanvasTextAlign = "center") {
+function drawPixelText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size = 10, color = CW.cream, align: CanvasTextAlign = "center") {
   ctx.save(); ctx.font = `${size}px 'Press Start 2P', monospace`;
   ctx.fillStyle = color; ctx.textAlign = align; ctx.fillText(text, x, y); ctx.restore();
 }
 
 function drawTerrain(ctx: CanvasRenderingContext2D, trees: Tree[], droughtIntensity: number) {
   // Ground — yellowed during drought
-  const gr = Math.floor(61 + droughtIntensity * 20);
-  const gg = Math.floor(107 - droughtIntensity * 40);
-  const gb = Math.floor(53 - droughtIntensity * 30);
+  const gr = Math.floor(119 + droughtIntensity * 72);
+  const gg = Math.floor(168 - droughtIntensity * 60);
+  const gb = Math.floor(187 - droughtIntensity * 117);
   ctx.fillStyle = `rgb(${gr},${gg},${gb})`;
   ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 
@@ -185,22 +226,23 @@ function drawTerrain(ctx: CanvasRenderingContext2D, trees: Tree[], droughtIntens
     { x: 700, y: 50, w: 160, h: 90 }, { x: 200, y: 400, w: 300, h: 120 },
     { x: 600, y: 350, w: 180, h: 140 },
   ];
-  const pr = Math.floor(74 + droughtIntensity * 30);
-  const pg = Math.floor(124 - droughtIntensity * 50);
-  ctx.fillStyle = `rgb(${pr},${pg},61)`;
+  const pr = Math.floor(247 + droughtIntensity * 8);
+  const pg = Math.floor(243 - droughtIntensity * 30);
+  const pb = Math.floor(234 - droughtIntensity * 110);
+  ctx.fillStyle = `rgb(${pr},${pg},${pb})`;
   patches.forEach(({ x, y, w, h }) => {
     ctx.beginPath(); ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2); ctx.fill();
   });
 
-  ctx.fillStyle = "#c8a06044";
+  ctx.fillStyle = "#FFF7E144";
   for (let i = 0; i < 8; i++) {
     ctx.beginPath(); ctx.ellipse(80 + i * 140, WORLD_H / 2 + 20, 30, 15, 0.3, 0, Math.PI * 2); ctx.fill();
   }
 
   trees.forEach(({ x, y, size }) => {
-    ctx.fillStyle = "#5c3010"; ctx.fillRect(x - 3, y, 6, size * 0.5);
-    const tc = droughtIntensity > 0.3 ? "#5a6620" : "#2d5a27";
-    const tc2 = droughtIntensity > 0.3 ? "#6a7828" : "#3a6e30";
+    ctx.fillStyle = "#8E4F34"; ctx.fillRect(x - 3, y, 6, size * 0.5);
+    const tc = droughtIntensity > 0.3 ? CW.peach : CW.blue;
+    const tc2 = droughtIntensity > 0.3 ? CW.orange : CW.navy;
     ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2); ctx.fillStyle = tc; ctx.fill();
     ctx.beginPath(); ctx.arc(x - size * 0.3, y - size * 0.2, size * 0.7, 0, Math.PI * 2); ctx.fillStyle = tc2; ctx.fill();
   });
@@ -235,46 +277,57 @@ function drawDroughtCracks(ctx: CanvasRenderingContext2D, cracks: DroughtCrack[]
 function drawShop(ctx: CanvasRenderingContext2D, nearShop: boolean, t: number) {
   const sx = SHOP_X - 36; const sy = SHOP_Y - 40; const w = 72; const h = 54;
   ctx.save(); ctx.beginPath(); ctx.ellipse(SHOP_X, SHOP_Y + 20, 80, 55, 0, 0, Math.PI * 2);
-  ctx.fillStyle = "#c8a060"; ctx.fill(); ctx.restore();
-  ctx.fillStyle = "#7a3c1a"; ctx.fillRect(sx, sy, w, h);
-  ctx.fillStyle = "#a02020"; ctx.beginPath(); ctx.moveTo(sx - 6, sy); ctx.lineTo(SHOP_X, sy - h * 0.5); ctx.lineTo(sx + w + 6, sy); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#f5c842"; ctx.fillRect(sx + 8, sy + 6, w - 16, 14);
-  ctx.save(); ctx.font = "7px 'Press Start 2P', monospace"; ctx.fillStyle = "#3d1e0a"; ctx.textAlign = "center"; ctx.fillText("SHOP", SHOP_X, sy + 16); ctx.restore();
-  ctx.fillStyle = "#3d1e0a"; ctx.fillRect(SHOP_X - 8, sy + h - 18, 16, 18);
-  ctx.fillStyle = "#f5c842aa"; ctx.fillRect(sx + 6, sy + 22, 14, 14); ctx.fillRect(sx + w - 20, sy + 22, 14, 14);
-  ctx.fillStyle = "#8b5030"; ctx.fillRect(sx - 14, sy + h - 20, 12, 16);
-  ctx.fillStyle = "#c07040"; ctx.fillRect(sx - 13, sy + h - 22, 10, 6);
+  ctx.fillStyle = "#F7F3EA"; ctx.fill(); ctx.restore();
+  ctx.fillStyle = CW.navy; ctx.fillRect(sx, sy, w, h);
+  ctx.fillStyle = CW.orange; ctx.beginPath(); ctx.moveTo(sx - 6, sy); ctx.lineTo(SHOP_X, sy - h * 0.5); ctx.lineTo(sx + w + 6, sy); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = CW.yellow; ctx.fillRect(sx + 8, sy + 6, w - 16, 14);
+  ctx.save(); ctx.font = "7px 'Press Start 2P', monospace"; ctx.fillStyle = CW.black; ctx.textAlign = "center"; ctx.fillText("SHOP", SHOP_X, sy + 16); ctx.restore();
+  ctx.fillStyle = CW.black; ctx.fillRect(SHOP_X - 8, sy + h - 18, 16, 18);
+  ctx.fillStyle = "#FFC907AA"; ctx.fillRect(sx + 6, sy + 22, 14, 14); ctx.fillRect(sx + w - 20, sy + 22, 14, 14);
+  ctx.fillStyle = "#466B7A"; ctx.fillRect(sx - 14, sy + h - 20, 12, 16);
+  ctx.fillStyle = CW.blue; ctx.fillRect(sx - 13, sy + h - 22, 10, 6);
   if (nearShop) {
     const pulse = 0.65 + Math.sin(t * 6) * 0.35;
     ctx.save(); ctx.beginPath(); ctx.arc(SHOP_X, SHOP_Y, SHOP_RADIUS, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(245,200,66,${pulse * 0.7})`; ctx.lineWidth = 2;
+    ctx.strokeStyle = `rgba(255,201,7,${pulse * 0.7})`; ctx.lineWidth = 2;
     ctx.setLineDash([6, 6]); ctx.stroke(); ctx.setLineDash([]);
-    ctx.font = "8px 'Press Start 2P', monospace"; ctx.fillStyle = `rgba(245,200,66,${pulse})`; ctx.textAlign = "center";
+    ctx.font = "8px 'Press Start 2P', monospace"; ctx.fillStyle = `rgba(255,201,7,${pulse})`; ctx.textAlign = "center";
     ctx.fillText("[E] SHOP", SHOP_X, SHOP_Y - 56); ctx.restore();
   }
 }
 
 function drawVillage(ctx: CanvasRenderingContext2D, population: number) {
   const vx = WORLD_W - 230; const vy = WORLD_H - 230;
-  ctx.save(); ctx.beginPath(); ctx.ellipse(vx + 60, vy + 60, 130, 100, 0, 0, Math.PI * 2); ctx.fillStyle = "#c8a060"; ctx.fill(); ctx.restore();
-  ctx.save(); ctx.strokeStyle = "#b89050"; ctx.lineWidth = 12; ctx.setLineDash([20, 12]);
-  ctx.beginPath(); ctx.moveTo(vx - 40, vy + 60); ctx.lineTo(40, vy + 60); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.ellipse(vx + 60, vy + 60, 130, 100, 0, 0, Math.PI * 2); ctx.fillStyle = "#F7F3EA"; ctx.fill(); ctx.restore();
+  ctx.save();
+  const roadY = vy + 74;
+  const roadH = 14;
+  const roadStartX = 26;
+  const roadEndX = vx + 8;
+  ctx.fillStyle = "#6A727C";
+  ctx.fillRect(roadStartX, roadY, roadEndX - roadStartX, roadH);
+  ctx.fillStyle = "#8A929C";
+  ctx.fillRect(roadStartX, roadY, roadEndX - roadStartX, 3);
+  ctx.strokeStyle = "#555C65";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(roadStartX, roadY, roadEndX - roadStartX, roadH);
+  ctx.restore();
   const buildings = [
-    { x: vx, y: vy + 20, w: 44, h: 38, color: "#8b5e3c" }, { x: vx + 55, y: vy, w: 52, h: 50, color: "#7a4e2d" },
-    { x: vx + 15, y: vy + 65, w: 38, h: 32, color: "#9c6a40" }, { x: vx + 65, y: vy + 62, w: 46, h: 40, color: "#855030" },
-    { x: vx + 115, y: vy + 25, w: 40, h: 45, color: "#6d4224" },
+    { x: vx, y: vy + 20, w: 44, h: 38, color: CW.navy }, { x: vx + 55, y: vy, w: 52, h: 50, color: "#2A5A80" },
+    { x: vx + 15, y: vy + 65, w: 38, h: 32, color: CW.blue }, { x: vx + 65, y: vy + 62, w: 46, h: 40, color: "#5A8EA6" },
+    { x: vx + 115, y: vy + 25, w: 40, h: 45, color: CW.gray },
   ].slice(0, Math.min(5, Math.max(1, Math.ceil(population / 7))));
   buildings.forEach(({ x, y, w, h, color }) => {
     ctx.fillStyle = color; ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = "#c0392b"; ctx.beginPath(); ctx.moveTo(x - 4, y); ctx.lineTo(x + w / 2, y - h * 0.45); ctx.lineTo(x + w + 4, y); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "#f5c842aa"; ctx.fillRect(x + w / 2 - 5, y + 8, 10, 10);
-    ctx.fillStyle = "#3d1e0a"; ctx.fillRect(x + w / 2 - 5, y + h - 14, 10, 14);
+    ctx.fillStyle = CW.orange; ctx.beginPath(); ctx.moveTo(x - 4, y); ctx.lineTo(x + w / 2, y - h * 0.45); ctx.lineTo(x + w + 4, y); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#FFC907AA"; ctx.fillRect(x + w / 2 - 5, y + 8, 10, 10);
+    ctx.fillStyle = CW.black; ctx.fillRect(x + w / 2 - 5, y + h - 14, 10, 14);
   });
-  ctx.save(); ctx.beginPath(); ctx.arc(vx + 100, vy + 100, 10, 0, Math.PI * 2); ctx.fillStyle = "#5c4020"; ctx.fill(); ctx.strokeStyle = "#8b6230"; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
-  drawPixelText(ctx, "VILLAGE", vx + 60, vy - 14, 7, "#f5c842");
-  ctx.save(); ctx.font = "11px 'VT323', monospace"; ctx.fillStyle = "#e8d5a3"; ctx.textAlign = "center"; ctx.fillText(`Pop: ${population}`, vx + 60, vy - 4); ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.arc(vx + 100, vy + 100, 10, 0, Math.PI * 2); ctx.fillStyle = CW.navy; ctx.fill(); ctx.strokeStyle = CW.blue; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
+  drawPixelText(ctx, "VILLAGE", vx + 60, vy - 14, 7, CW.yellow);
+  ctx.save(); ctx.font = "11px 'VT323', monospace"; ctx.fillStyle = CW.cream; ctx.textAlign = "center"; ctx.fillText(`Pop: ${population}`, vx + 60, vy - 4); ctx.restore();
   ctx.save(); ctx.beginPath(); ctx.arc(vx + 60, vy + 60, DELIVER_RADIUS, 0, Math.PI * 2);
-  ctx.strokeStyle = "#f5c84244"; ctx.lineWidth = 2; ctx.setLineDash([6, 6]); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+  ctx.strokeStyle = "#FFC90744"; ctx.lineWidth = 2; ctx.setLineDash([6, 6]); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
 }
 
 function drawWaterSource(ctx: CanvasRenderingContext2D, src: WaterSource, collecting: boolean, t: number, hasFilter: boolean, weather: WeatherState, weatherIntensity: number) {
@@ -294,7 +347,7 @@ function drawWaterSource(ctx: CanvasRenderingContext2D, src: WaterSource, collec
       // Dry river bed
       ctx.save(); ctx.beginPath(); ctx.ellipse(x, y, 32, 18, -0.3, 0, Math.PI * 2);
       ctx.fillStyle = "rgba(160,120,60,0.5)"; ctx.fill(); ctx.restore();
-      drawPixelText(ctx, "DRY", x, y - 24, 6, "#b07030");
+      drawPixelText(ctx, "DRY", x, y - 24, 6, CW.orange);
     } else {
       const wave = Math.sin(t * 2.5) * 3;
       ctx.save();
@@ -304,24 +357,33 @@ function drawWaterSource(ctx: CanvasRenderingContext2D, src: WaterSource, collec
       ctx.beginPath(); ctx.ellipse(x + wave * 0.5, y - 4, 16, 5, -0.3, 0, Math.PI * 2);
       ctx.fillStyle = contaminated ? `rgba(180,130,60,${0.3 + Math.sin(t * 3) * 0.15})` : `rgba(160,220,255,${0.3 + Math.sin(t * 3) * 0.15 + rainBoost})`;
       ctx.fill(); ctx.restore();
-      drawPixelText(ctx, contaminated ? "~DIRTY~" : "~RIVER~", x, y - 26, 6, contaminated ? "#b07030" : "#6ec6ff");
+      drawPixelText(ctx, contaminated ? "~DIRTY~" : "~RIVER~", x, y - 26, 6, contaminated ? CW.orange : CW.blue);
     }
   } else if (type === "well") {
+    const wellBody = isDry ? "#3a2010" : contaminated ? "#5c4020" : "#1e4f8f";
+    const wellStroke = isDry ? "#6a3010" : contaminated ? "#8b6230" : "#77A8BB";
+    const beamColor = contaminated ? "#8b6230" : "#77A8BB";
+    const bucketColor = contaminated ? "#6a3a10" : "#3B7FD6";
     ctx.save();
     ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI * 2);
-    ctx.fillStyle = built ? "#2a4a1a" : isDry ? "#3a2010" : "#5c4020"; ctx.fill();
-    ctx.strokeStyle = built ? "#5a9a30" : isDry ? "#6a3010" : "#8b6230"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = wellBody; ctx.fill();
+    ctx.strokeStyle = wellStroke; ctx.lineWidth = 3; ctx.stroke();
+    if (built && !isDry) {
+      ctx.strokeStyle = CW.yellow;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
     const swing = isDry ? 0 : Math.sin(t * 1.8) * 6;
     if (!isDry) {
-      ctx.strokeStyle = "#a07040"; ctx.lineWidth = 2;
+      ctx.strokeStyle = beamColor; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(x + swing * 0.5, y - 16); ctx.lineTo(x + swing, y - 26); ctx.stroke();
-      ctx.fillStyle = contaminated ? "#6a3a10" : "#8b6230"; ctx.fillRect(x + swing - 4, y - 33, 8, 7);
+      ctx.fillStyle = bucketColor; ctx.fillRect(x + swing - 4, y - 33, 8, 7);
     }
-    ctx.strokeStyle = built ? "#5a9a30" : "#8b6230"; ctx.lineWidth = 4;
+    ctx.strokeStyle = wellStroke; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(x - 14, y - 16); ctx.lineTo(x + 14, y - 16); ctx.stroke();
     ctx.restore();
     const label = isDry ? "EMPTY" : built ? "★ WELL" : contaminated ? "WELL!" : "WELL";
-    const labelColor = isDry ? "#7a4020" : built ? "#8be060" : contaminated ? "#b07030" : "#a0c8ff";
+    const labelColor = isDry ? CW.orange : built ? CW.yellow : contaminated ? CW.orange : CW.blue;
     drawPixelText(ctx, label, x, y - 44, 6, labelColor);
   } else {
     if (isDry) {
@@ -332,7 +394,7 @@ function drawWaterSource(ctx: CanvasRenderingContext2D, src: WaterSource, collec
       ctx.save(); ctx.beginPath(); ctx.ellipse(x, y, 20 + wv, 12, 0.2, 0, Math.PI * 2);
       ctx.fillStyle = `${waterBlue}${0.3 + pct * 0.5 + rainBoost})`; ctx.fill();
       ctx.strokeStyle = contaminated ? "#9a6020" : "#6ec6ff"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
-      drawPixelText(ctx, contaminated ? "☠" : "~", x, y - 18, 8, contaminated ? "#b07030" : "#6ec6ff");
+      drawPixelText(ctx, contaminated ? "☠" : "~", x, y - 18, 8, contaminated ? CW.orange : CW.blue);
     }
   }
 
@@ -384,8 +446,14 @@ function drawDusts(ctx: CanvasRenderingContext2D, dusts: DustPuff[]) {
 
 function drawFloatTexts(ctx: CanvasRenderingContext2D, floatTexts: FloatText[]) {
   floatTexts.forEach(ft => {
-    const a = ft.age < 0.3 ? ft.age / 0.3 : 1 - (ft.age - 0.3) / 0.7;
-    ctx.save(); ctx.font = "9px 'Press Start 2P', monospace"; ctx.fillStyle = ft.color;
+    const fadeInDuration = 0.3;
+    const fadeOutDuration = 1.4;
+    const a = ft.age < fadeInDuration
+      ? ft.age / fadeInDuration
+      : 1 - (ft.age - fadeInDuration) / fadeOutDuration;
+    const largeStatText = /HP|POP|NO POP|BOUGHT|WELL BUILT/.test(ft.text);
+    const size = largeStatText ? 24 : 11;
+    ctx.save(); ctx.font = `${size}px 'Press Start 2P', monospace`; ctx.fillStyle = ft.color;
     ctx.globalAlpha = Math.max(0, a); ctx.textAlign = "center"; ctx.fillText(ft.text, ft.x, ft.y); ctx.restore();
   });
 }
@@ -395,24 +463,34 @@ function drawPlayer(ctx: CanvasRenderingContext2D, px: number, py: number, water
   const bobY = walkFrame === 1 ? -2 : 0;
   ctx.save(); ctx.beginPath(); ctx.ellipse(px, py + PLAYER_SIZE + 2, 9, 3.5, 0, 0, Math.PI * 2); ctx.fillStyle = "rgba(0,0,0,0.28)"; ctx.fill(); ctx.restore();
   const legOff = walkFrame === 1 ? 3 : walkFrame === 2 ? -3 : 0;
-  ctx.save(); ctx.fillStyle = "#3a2010"; ctx.fillRect(px - 7 + legOff, py + PLAYER_SIZE - 4 + bobY, 6, 8); ctx.fillRect(px + 1 - legOff, py + PLAYER_SIZE - 4 + bobY, 6, 8); ctx.restore();
+  ctx.save(); ctx.fillStyle = "#744733"; ctx.fillRect(px - 7 + legOff, py + PLAYER_SIZE - 4 + bobY, 6, 8); ctx.fillRect(px + 1 - legOff, py + PLAYER_SIZE - 4 + bobY, 6, 8); ctx.restore();
   ctx.save(); ctx.beginPath(); ctx.arc(px, py + bobY, PLAYER_SIZE, 0, Math.PI * 2);
-  ctx.fillStyle = carrying ? (bucketContaminated ? "#6b3a10" : "#2a6bbf") : "#4a7c59";
-  ctx.fill(); ctx.strokeStyle = "#e8d5a3"; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+  ctx.fillStyle = carrying ? (bucketContaminated ? "#9A5C3E" : CW.navy) : CW.blue;
+  ctx.fill(); ctx.strokeStyle = CW.cream; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
   const eyeOff = facing === "right" ? 1 : -1;
   ctx.save(); ctx.beginPath();
   ctx.arc(px - 3 + eyeOff, py - 3 + bobY, 2.5, 0, Math.PI * 2);
   ctx.arc(px + 3 + eyeOff, py - 3 + bobY, 2.5, 0, Math.PI * 2);
   ctx.fillStyle = "#1a120a"; ctx.fill(); ctx.restore();
   if (carrying) {
-    const jugFill = water / maxWater;
+    const canFill = water / maxWater;
+    const canX = px - 6;
+    const canY = py - PLAYER_SIZE - 16 + bobY;
     ctx.save();
-    ctx.fillStyle = bucketContaminated ? "#6b2a05" : "#1a4880";
-    ctx.beginPath(); ctx.roundRect(px - 6, py - PLAYER_SIZE - 15 + bobY, 12, 13, 2); ctx.fill();
-    ctx.fillStyle = bucketContaminated ? "#7a4010" : "#1e90ff";
-    ctx.fillRect(px - 5, py - PLAYER_SIZE - 4 - Math.round(jugFill * 9) + bobY, 10, Math.round(jugFill * 9));
-    ctx.strokeStyle = bucketContaminated ? "#a07020" : "#6ec6ff"; ctx.lineWidth = 1.5; ctx.strokeRect(px - 6, py - PLAYER_SIZE - 15 + bobY, 12, 13);
-    if (bucketContaminated) { ctx.font = "9px serif"; ctx.fillStyle = "#e84040"; ctx.textAlign = "center"; ctx.fillText("☠", px, py - PLAYER_SIZE - 16 + bobY); }
+    ctx.fillStyle = CW.yellow;
+    ctx.beginPath(); ctx.roundRect(canX, canY, 12, 14, 2); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.fillRect(canX + 2, canY + 2, 4, 2);
+    ctx.fillStyle = bucketContaminated ? CW.orange : CW.blue;
+    ctx.fillRect(canX + 2, canY + 12 - Math.round(canFill * 8), 8, Math.round(canFill * 8));
+    ctx.strokeStyle = bucketContaminated ? CW.orange : CW.navy; ctx.lineWidth = 1.2; ctx.strokeRect(canX, canY, 12, 14);
+    ctx.beginPath();
+    ctx.moveTo(canX + 3, canY + 5); ctx.lineTo(canX + 9, canY + 11);
+    ctx.moveTo(canX + 9, canY + 5); ctx.lineTo(canX + 3, canY + 11);
+    ctx.strokeStyle = bucketContaminated ? "#8E4F34" : CW.cream;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (bucketContaminated) { ctx.font = "9px serif"; ctx.fillStyle = CW.orange; ctx.textAlign = "center"; ctx.fillText("☠", px, canY - 1); }
     ctx.restore();
   }
   if (collectingFrom !== null) {
@@ -623,6 +701,26 @@ export function WaterGame() {
   const keysRef = useRef<Set<string>>(new Set());
   const animRef = useRef<number>(0);
   const shimmerCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const touchMoveRef = useRef<{ x: number; y: number; active: boolean }>({ x: 0, y: 0, active: false });
+  const droughtLoopRef = useRef<HTMLAudioElement | null>(null);
+  const rainLoopRef = useRef<HTMLAudioElement | null>(null);
+  const cleanWellLoopRef = useRef<HTMLAudioElement | null>(null);
+  const cleanDeliveryRef = useRef<HTMLAudioElement | null>(null);
+  const dirtyHookRef = useRef<HTMLAudioElement | null>(null);
+  const dirtyDeliveryRef = useRef<HTMLAudioElement | null>(null);
+  const bgMusicRef = useRef<HTMLAudioElement | null>(null);
+  const prevWeatherRef = useRef<WeatherState>("clear");
+  const prevGameOverRef = useRef(false);
+  const wasCollectingCleanWellRef = useRef(false);
+  const wasCollectingDirtyRef = useRef(false);
+  const audioUnlockedRef = useRef(false);
+  const totalGoodWaterCollectedRef = useRef(0);
+  const totalBadWaterCollectedRef = useRef(0);
+  const weekStartPopulationRef = useRef(25);
+  const weekStartFundsRef = useRef(0);
+  const weekStartGoodWaterRef = useRef(0);
+  const weekStartBadWaterRef = useRef(0);
+  const weekSummaryRef = useRef<WeekSummary | null>(null);
 
   const [uiState, setUiState] = useState({
     health: 100, water: 0, maxWater: BASE_MAX_WATER,
@@ -636,11 +734,234 @@ export function WaterGame() {
     weatherIntensity: 0,
   });
   const [shopOpen, setShopOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [stickPos, setStickPos] = useState({ x: 0, y: 0 });
+  const [weekSummary, setWeekSummary] = useState<WeekSummary | null>(null);
+  const viewW = isMobile ? MOBILE_VIEW_W : WORLD_W;
+  const viewH = isMobile ? MOBILE_VIEW_H : WORLD_H;
+
+  const updateMobileFlag = useCallback(() => {
+    const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+    setIsMobile(coarsePointer || window.innerWidth <= 900);
+  }, []);
+
+  const placeWellAtPlayer = useCallback(() => {
+    const s = stateRef.current;
+    if (s.gameOver || !s.buildMode) return;
+    if (s.money >= WELL_COST && canPlaceWell(s)) {
+      const nw = { x: s.px, y: s.py };
+      stateRef.current.money -= WELL_COST;
+      stateRef.current.builtWells = [...s.builtWells, nw];
+      const id = 1000 + stateRef.current.builtWells.length - 1;
+      stateRef.current.sources = [...s.sources, { id, x: s.px, y: s.py, amount: 80, maxAmount: 80, type: "well", contaminated: false, built: true }];
+      stateRef.current.buildMode = false;
+      stateRef.current.floatTexts = [...s.floatTexts, { id: ++stateRef.current.lastFloatId, x: s.px, y: s.py - 50, text: "★ WELL BUILT!", color: CW.yellow, age: 0 }];
+    }
+  }, []);
+
+  const updateStick = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const rawX = e.clientX - cx;
+    const rawY = e.clientY - cy;
+    const maxR = rect.width * 0.38;
+    const dist = Math.hypot(rawX, rawY);
+    const scale = dist > maxR ? maxR / dist : 1;
+    const clampedX = rawX * scale;
+    const clampedY = rawY * scale;
+    touchMoveRef.current = {
+      x: clampedX / maxR,
+      y: clampedY / maxR,
+      active: true,
+    };
+    setStickPos({ x: clampedX, y: clampedY });
+  }, []);
+
+  const releaseStick = useCallback(() => {
+    touchMoveRef.current = { x: 0, y: 0, active: false };
+    setStickPos({ x: 0, y: 0 });
+  }, []);
+
+  const safePlay = useCallback((audio: HTMLAudioElement | null) => {
+    if (!audio) return;
+    const playPromise = audio.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch(() => {
+        // Ignore autoplay errors until user interaction unlocks audio.
+      });
+    }
+  }, []);
+
+  const unlockAudio = useCallback(() => {
+    if (audioUnlockedRef.current) return;
+    audioUnlockedRef.current = true;
+
+    const audios = [
+      droughtLoopRef.current,
+      rainLoopRef.current,
+      cleanWellLoopRef.current,
+      cleanDeliveryRef.current,
+      dirtyHookRef.current,
+      dirtyDeliveryRef.current,
+      bgMusicRef.current,
+    ].filter((a): a is HTMLAudioElement => a !== null);
+
+    // Prime all audio elements inside a user gesture so later programmatic play works on mobile.
+    audios.forEach((audio) => {
+      const prevMuted = audio.muted;
+      audio.muted = true;
+      const p = audio.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.muted = prevMuted;
+        }).catch(() => {
+          audio.muted = prevMuted;
+        });
+      } else {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = prevMuted;
+      }
+    });
+
+    // Resync any currently active ambient/loop sounds immediately after unlock.
+    const cur = stateRef.current;
+    if (!cur.gameOver) {
+      safePlay(bgMusicRef.current);
+      if (cur.weather === "rain") safePlay(rainLoopRef.current);
+      if (cur.weather === "drought") safePlay(droughtLoopRef.current);
+    } else {
+      safePlay(droughtLoopRef.current);
+    }
+    const activeSource = cur.collectingFrom === null
+      ? null
+      : cur.sources.find(src => src.id === cur.collectingFrom) ?? null;
+    if (activeSource && activeSource.type === "well" && !activeSource.contaminated) {
+      safePlay(cleanWellLoopRef.current);
+    }
+  }, [safePlay]);
+
+  useEffect(() => {
+    const drought = new Audio(SFX_DROUGHT_WIND);
+    drought.loop = true;
+    drought.volume = 0.35;
+
+    const rain = new Audio(SFX_RAIN_THUNDER);
+    rain.loop = true;
+    rain.volume = 0.4;
+
+    const cleanWell = new Audio(SFX_WELL_FILL);
+    cleanWell.loop = true;
+    cleanWell.volume = 0.35;
+
+    const cleanDelivery = new Audio(SFX_CLEAN_DELIVERY);
+    cleanDelivery.volume = 0.6;
+
+    const dirtyHook = new Audio(SFX_DIRTY_HOOK);
+    dirtyHook.volume = 0.65;
+
+    const dirtyDelivery = new Audio(SFX_DIRTY_DELIVERY);
+    dirtyDelivery.volume = 0.65;
+
+    const bgMusic = new Audio(SFX_BG_MUSIC);
+    bgMusic.loop = true;
+    bgMusic.volume = 0.24;
+
+    droughtLoopRef.current = drought;
+    rainLoopRef.current = rain;
+    cleanWellLoopRef.current = cleanWell;
+    cleanDeliveryRef.current = cleanDelivery;
+    dirtyHookRef.current = dirtyHook;
+    dirtyDeliveryRef.current = dirtyDelivery;
+    bgMusicRef.current = bgMusic;
+
+    return () => {
+      [drought, rain, cleanWell, cleanDelivery, dirtyHook, dirtyDelivery, bgMusic].forEach((audio) => {
+        audio.pause();
+        audio.currentTime = 0;
+      });
+      droughtLoopRef.current = null;
+      rainLoopRef.current = null;
+      cleanWellLoopRef.current = null;
+      cleanDeliveryRef.current = null;
+      dirtyHookRef.current = null;
+      dirtyDeliveryRef.current = null;
+      bgMusicRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onFirstUserGesture = () => unlockAudio();
+    window.addEventListener("pointerdown", onFirstUserGesture, { passive: true });
+    window.addEventListener("touchstart", onFirstUserGesture, { passive: true });
+    window.addEventListener("keydown", onFirstUserGesture);
+    return () => {
+      window.removeEventListener("pointerdown", onFirstUserGesture);
+      window.removeEventListener("touchstart", onFirstUserGesture);
+      window.removeEventListener("keydown", onFirstUserGesture);
+    };
+  }, [unlockAudio]);
 
   const handleNewDay = useCallback(() => {
     const s = stateRef.current;
-    stateRef.current = s.gameOver ? initState() : initState(s);
+    if (s.gameOver) {
+      stateRef.current = initState();
+      totalGoodWaterCollectedRef.current = 0;
+      totalBadWaterCollectedRef.current = 0;
+      weekStartPopulationRef.current = stateRef.current.population;
+      weekStartFundsRef.current = stateRef.current.money;
+      weekStartGoodWaterRef.current = 0;
+      weekStartBadWaterRef.current = 0;
+      setWeekSummary(null);
+      weekSummaryRef.current = null;
+      setShopOpen(false);
+      return;
+    }
+
+    const nextState = initState(s);
+    stateRef.current = nextState;
+
+    if (nextState.day > 1 && (nextState.day - 1) % 7 === 0) {
+      const summary: WeekSummary = {
+        week: (nextState.day - 1) / 7,
+        populationGain: Math.max(0, s.population - weekStartPopulationRef.current),
+        fundsRaised: Math.max(0, s.money - weekStartFundsRef.current),
+        goodWaterCollected: Math.max(0, totalGoodWaterCollectedRef.current - weekStartGoodWaterRef.current),
+        badWaterCollected: Math.max(0, totalBadWaterCollectedRef.current - weekStartBadWaterRef.current),
+      };
+      setWeekSummary(summary);
+      weekSummaryRef.current = summary;
+      weekStartPopulationRef.current = s.population;
+      weekStartFundsRef.current = s.money;
+      weekStartGoodWaterRef.current = totalGoodWaterCollectedRef.current;
+      weekStartBadWaterRef.current = totalBadWaterCollectedRef.current;
+    }
     setShopOpen(false);
+  }, []);
+
+  const handleResetGame = useCallback(() => {
+    stateRef.current = initState();
+    setShopOpen(false);
+    setWeekSummary(null);
+    weekSummaryRef.current = null;
+    totalGoodWaterCollectedRef.current = 0;
+    totalBadWaterCollectedRef.current = 0;
+    weekStartPopulationRef.current = stateRef.current.population;
+    weekStartFundsRef.current = stateRef.current.money;
+    weekStartGoodWaterRef.current = 0;
+    weekStartBadWaterRef.current = 0;
+    prevWeatherRef.current = "clear";
+    prevGameOverRef.current = false;
+    wasCollectingCleanWellRef.current = false;
+    wasCollectingDirtyRef.current = false;
+  }, []);
+
+  const handleContinueAfterWeekSummary = useCallback(() => {
+    setWeekSummary(null);
+    weekSummaryRef.current = null;
   }, []);
 
   const handleBuy = useCallback((upgradeId: string) => {
@@ -656,8 +977,14 @@ export function WaterGame() {
     stateRef.current.maxWater = computeMaxWater(nu);
     stateRef.current.speed = computeSpeed(nu);
     stateRef.current.healthDecay = computeHealthDecay(nu);
-    stateRef.current.floatTexts = [...s.floatTexts, { id: ++stateRef.current.lastFloatId, x: SHOP_X, y: SHOP_Y - 70, text: `${upg.icon} BOUGHT!`, color: "#f5c842", age: 0 }];
+    stateRef.current.floatTexts = [...s.floatTexts, { id: ++stateRef.current.lastFloatId, x: SHOP_X, y: SHOP_Y - 70, text: `${upg.icon} BOUGHT!`, color: CW.yellow, age: 0 }];
   }, []);
+
+  useEffect(() => {
+    updateMobileFlag();
+    window.addEventListener("resize", updateMobileFlag);
+    return () => window.removeEventListener("resize", updateMobileFlag);
+  }, [updateMobileFlag]);
 
   useEffect(() => {
     const onDown = (e: KeyboardEvent) => {
@@ -666,16 +993,7 @@ export function WaterGame() {
       if (e.key === "Escape") { setShopOpen(false); stateRef.current.buildMode = false; }
       if ((e.key === "b" || e.key === "B") && !stateRef.current.gameOver) stateRef.current.buildMode = !stateRef.current.buildMode;
       if (e.key === " " && stateRef.current.buildMode && !stateRef.current.gameOver) {
-        const s = stateRef.current;
-        if (s.money >= WELL_COST && canPlaceWell(s)) {
-          const nw = { x: s.px, y: s.py };
-          stateRef.current.money -= WELL_COST;
-          stateRef.current.builtWells = [...s.builtWells, nw];
-          const id = 1000 + stateRef.current.builtWells.length - 1;
-          stateRef.current.sources = [...s.sources, { id, x: s.px, y: s.py, amount: 80, maxAmount: 80, type: "well", contaminated: false, built: true }];
-          stateRef.current.buildMode = false;
-          stateRef.current.floatTexts = [...s.floatTexts, { id: ++stateRef.current.lastFloatId, x: s.px, y: s.py - 50, text: "★ WELL BUILT!", color: "#8be060", age: 0 }];
-        }
+        placeWellAtPlayer();
       }
       keysRef.current.add(e.key);
     };
@@ -683,7 +1001,7 @@ export function WaterGame() {
     window.addEventListener("keydown", onDown);
     window.addEventListener("keyup", onUp);
     return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("keyup", onUp); };
-  }, []);
+  }, [placeWellAtPlayer]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -692,7 +1010,7 @@ export function WaterGame() {
 
     // Offscreen canvas for heat shimmer post-process
     const shimmerCanvas = document.createElement("canvas");
-    shimmerCanvas.width = WORLD_W; shimmerCanvas.height = WORLD_H;
+    shimmerCanvas.width = viewW; shimmerCanvas.height = viewH;
     shimmerCanvasRef.current = shimmerCanvas;
     const shimmerCtx = shimmerCanvas.getContext("2d")!;
 
@@ -703,7 +1021,7 @@ export function WaterGame() {
       stateRef.current.lastTime = timestamp;
       const t = timestamp / 1000;
 
-      if (!s.gameOver) {
+      if (!s.gameOver && !weekSummaryRef.current) {
         // Movement
         const keys = keysRef.current;
         let dx = 0, dy = 0;
@@ -711,6 +1029,10 @@ export function WaterGame() {
         if (keys.has("ArrowRight") || keys.has("d")) dx += s.speed;
         if (keys.has("ArrowUp") || keys.has("w")) dy -= s.speed;
         if (keys.has("ArrowDown") || keys.has("s")) dy += s.speed;
+        if (touchMoveRef.current.active) {
+          dx += touchMoveRef.current.x * s.speed;
+          dy += touchMoveRef.current.y * s.speed;
+        }
         if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
         const moving = dx !== 0 || dy !== 0;
         if (dx !== 0) stateRef.current.facing = dx > 0 ? "right" : "left";
@@ -723,8 +1045,11 @@ export function WaterGame() {
           if (stateRef.current.walkTimer > 0.18) { stateRef.current.walkTimer = 0; stateRef.current.walkFrame = (s.walkFrame + 1) % 3; }
         } else { stateRef.current.walkFrame = 0; }
 
+        const hasFilter = s.purchasedUpgrades.has("filter");
+
         // Health decay
-        stateRef.current.health = Math.max(0, s.health - s.healthDecay * (moving ? 1.4 : 1));
+        const dirtyStatusMultiplier = s.bucketContaminated && !hasFilter ? DIRTY_STATUS_HEALTH_MULTIPLIER : 1;
+        stateRef.current.health = Math.max(0, s.health - s.healthDecay * (moving ? 1.4 : 1) * dirtyStatusMultiplier);
 
         // Donations
         const donPerSec = (s.population * DONATION_PER_PERSON_PER_DAY) / DAY_DURATION;
@@ -753,7 +1078,7 @@ export function WaterGame() {
               id: ++stateRef.current.lastFloatId,
               x: WORLD_W / 2, y: WORLD_H / 2 - 60,
               text: pick === "rain" ? "⛈ RAINSTORM!" : "☀ DROUGHT!",
-              color: pick === "rain" ? "#6ec6ff" : "#f5a020",
+              color: pick === "rain" ? CW.blue : CW.orange,
               age: 0,
             }];
           }
@@ -801,26 +1126,40 @@ export function WaterGame() {
         stateRef.current.sources = updatedSourcesWeather;
 
         // Collect water
-        const hasFilter = s.purchasedUpgrades.has("filter");
         let collectingFrom: number | null = null;
         let collectingContaminated = false;
-        const updatedSources = stateRef.current.sources.map(src => {
+        let filledCleanWellThisFrame = false;
+
+        // Collect from only the nearest valid source so contamination + SFX are deterministic.
+        let nearestIndex = -1;
+        let nearestDist = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < stateRef.current.sources.length; i++) {
+          const src = stateRef.current.sources[i];
           const dist = Math.hypot(s.px - src.x, s.py - src.y);
-          if (dist < COLLECT_RADIUS && src.amount > 0 && s.water < s.maxWater) {
-            collectingFrom = src.id;
-            if (src.contaminated && !hasFilter) collectingContaminated = true;
-            const take = Math.min(COLLECT_RATE, src.amount, s.maxWater - s.water);
-            stateRef.current.water = Math.min(s.maxWater, s.water + take);
-            return { ...src, amount: Math.max(0, src.amount - take) };
+          if (dist < COLLECT_RADIUS && src.amount > 0 && s.water < s.maxWater && dist < nearestDist) {
+            nearestDist = dist;
+            nearestIndex = i;
           }
-          return src;
+        }
+
+        const updatedSources = stateRef.current.sources.map((src, idx) => {
+          if (idx !== nearestIndex) return src;
+          collectingFrom = src.id;
+          if (src.contaminated && !hasFilter) collectingContaminated = true;
+          const take = Math.min(COLLECT_RATE, src.amount, s.maxWater - s.water);
+          stateRef.current.water = Math.min(s.maxWater, s.water + take);
+          if (take > 0) {
+            if (src.contaminated) totalBadWaterCollectedRef.current += take;
+            else totalGoodWaterCollectedRef.current += take;
+          }
+          if (take > 0 && src.type === "well" && !src.contaminated) filledCleanWellThisFrame = true;
+          return { ...src, amount: Math.max(0, src.amount - take) };
         });
         stateRef.current.sources = updatedSources;
         stateRef.current.collectingFrom = collectingFrom;
 
         if (collectingContaminated) {
           stateRef.current.bucketContaminated = true;
-          stateRef.current.health = Math.max(0, stateRef.current.health - CONTAM_HEALTH_PENALTY * dt);
         }
         if (s.bucketContaminated && s.water > 0 && !hasFilter) {
           stateRef.current.water = Math.max(0, stateRef.current.water - CONTAM_WATER_PENALTY * dt);
@@ -832,7 +1171,7 @@ export function WaterGame() {
         if (Math.hypot(s.px - vx, s.py - vy) < DELIVER_RADIUS && s.water > 0) {
           const deliveredWater = s.water;
           const contaminatedDelivery = s.bucketContaminated;
-          const popGain = contaminatedDelivery ? 1 : POP_PER_DELIVERY;
+          const popGain = contaminatedDelivery ? 0 : POP_PER_DELIVERY;
           // Health restored 1:1 with water delivered
           const healthGain = deliveredWater * (contaminatedDelivery ? 0.3 : 1.0);
           stateRef.current.health = Math.min(100, stateRef.current.health + healthGain);
@@ -840,14 +1179,21 @@ export function WaterGame() {
           stateRef.current.bucketContaminated = false;
           stateRef.current.population += popGain;
           stateRef.current.deliveryFlash = 1;
-          const popText = contaminatedDelivery ? `+${popGain} POP (dirty!)` : `+${popGain} POP`;
+          const popText = contaminatedDelivery ? "NO POP (DIRTY WATER)" : `+${popGain} POP`;
           const healthText = `+${Math.round(healthGain)} HP`;
           stateRef.current.floatTexts = [
             ...s.floatTexts,
-            { id: ++stateRef.current.lastFloatId, x: vx - 20, y: vy - 50, text: popText, color: contaminatedDelivery ? "#e84040" : "#8be060", age: 0 },
-            { id: stateRef.current.lastFloatId + 1, x: vx + 20, y: vy - 68, text: healthText, color: "#ff6060", age: 0 },
+            { id: ++stateRef.current.lastFloatId, x: vx - 20, y: vy - 50, text: popText, color: contaminatedDelivery ? CW.orange : CW.yellow, age: 0 },
+            { id: stateRef.current.lastFloatId + 1, x: vx + 20, y: vy - 68, text: healthText, color: CW.peach, age: 0 },
           ];
           stateRef.current.lastFloatId++;
+          if (!contaminatedDelivery) {
+            if (cleanDeliveryRef.current) cleanDeliveryRef.current.currentTime = 0;
+            safePlay(cleanDeliveryRef.current);
+          } else {
+            if (dirtyDeliveryRef.current) dirtyDeliveryRef.current.currentTime = 0;
+            safePlay(dirtyDeliveryRef.current);
+          }
         }
 
         if (s.deliveryFlash > 0) stateRef.current.deliveryFlash = Math.max(0, s.deliveryFlash - dt * 1.8);
@@ -883,12 +1229,84 @@ export function WaterGame() {
         }
         stateRef.current.dusts = stateRef.current.dusts.map(d => ({ ...d, x: d.x + d.vx * dt, y: d.y + d.vy * dt, radius: d.radius + dt * 6, alpha: d.alpha - dt * 1.4 })).filter(d => d.alpha > 0.02);
 
-        stateRef.current.floatTexts = stateRef.current.floatTexts.map(ft => ({ ...ft, y: ft.y - 28 * dt, age: ft.age + dt })).filter(ft => ft.age < 1.4);
+        stateRef.current.floatTexts = stateRef.current.floatTexts.map(ft => ({ ...ft, y: ft.y - 24 * dt, age: ft.age + dt })).filter(ft => ft.age < 3.0);
+
+        // ── Sound triggers ───────────────────────────────────────
+        if (prevWeatherRef.current !== stateRef.current.weather) {
+          const rainLoop = rainLoopRef.current;
+          const droughtLoop = droughtLoopRef.current;
+          if (rainLoop) {
+            rainLoop.pause();
+            rainLoop.currentTime = 0;
+          }
+          if (droughtLoop) {
+            droughtLoop.pause();
+            droughtLoop.currentTime = 0;
+          }
+          if (stateRef.current.weather === "rain") safePlay(rainLoop);
+          if (stateRef.current.weather === "drought") safePlay(droughtLoop);
+          prevWeatherRef.current = stateRef.current.weather;
+        }
+
+        // Background music while alive.
+        if (bgMusicRef.current?.paused) safePlay(bgMusicRef.current);
+
+        const activeSource = stateRef.current.collectingFrom === null
+          ? null
+          : stateRef.current.sources.find(src => src.id === stateRef.current.collectingFrom) ?? null;
+        const collectingCleanWell = filledCleanWellThisFrame || (!!activeSource && activeSource.type === "well" && !activeSource.contaminated);
+        const collectingDirtySite = !!activeSource && activeSource.contaminated;
+
+        if (collectingCleanWell) {
+          if (!wasCollectingCleanWellRef.current && cleanWellLoopRef.current) {
+            cleanWellLoopRef.current.currentTime = 0;
+          }
+          if (cleanWellLoopRef.current?.paused) {
+            safePlay(cleanWellLoopRef.current);
+          }
+        } else if (wasCollectingCleanWellRef.current && cleanWellLoopRef.current) {
+          cleanWellLoopRef.current.pause();
+          cleanWellLoopRef.current.currentTime = 0;
+        }
+        wasCollectingCleanWellRef.current = collectingCleanWell;
+
+        if (collectingDirtySite && !wasCollectingDirtyRef.current) {
+          if (dirtyHookRef.current) dirtyHookRef.current.currentTime = 0;
+          safePlay(dirtyHookRef.current);
+        }
+        wasCollectingDirtyRef.current = collectingDirtySite;
       }
+
+      if (stateRef.current.gameOver) {
+        if (cleanWellLoopRef.current && !cleanWellLoopRef.current.paused) {
+          cleanWellLoopRef.current.pause();
+          cleanWellLoopRef.current.currentTime = 0;
+        }
+      }
+
+      // Game over audio state management.
+      if (!prevGameOverRef.current && stateRef.current.gameOver) {
+        if (rainLoopRef.current) { rainLoopRef.current.pause(); rainLoopRef.current.currentTime = 0; }
+        if (cleanWellLoopRef.current) { cleanWellLoopRef.current.pause(); cleanWellLoopRef.current.currentTime = 0; }
+        if (bgMusicRef.current) { bgMusicRef.current.pause(); bgMusicRef.current.currentTime = 0; }
+        if (droughtLoopRef.current) droughtLoopRef.current.currentTime = 0;
+        safePlay(droughtLoopRef.current);
+      } else if (prevGameOverRef.current && !stateRef.current.gameOver) {
+        if (droughtLoopRef.current) { droughtLoopRef.current.pause(); droughtLoopRef.current.currentTime = 0; }
+        if (bgMusicRef.current) bgMusicRef.current.currentTime = 0;
+        safePlay(bgMusicRef.current);
+      }
+      prevGameOverRef.current = stateRef.current.gameOver;
 
       // ─── DRAW ─────────────────────────────────────────────────────────────
       const cur = stateRef.current;
-      ctx.clearRect(0, 0, WORLD_W, WORLD_H);
+      ctx.clearRect(0, 0, viewW, viewH);
+
+      const camX = isMobile ? Math.max(0, Math.min(WORLD_W - viewW, cur.px - viewW / 2)) : 0;
+      const camY = isMobile ? Math.max(0, Math.min(WORLD_H - viewH, cur.py - viewH / 2)) : 0;
+
+      ctx.save();
+      ctx.translate(-camX, -camY);
 
       drawTerrain(ctx, cur.trees, cur.weather === "drought" ? cur.weatherIntensity : 0);
       drawDroughtCracks(ctx, cur.droughtCracks, cur.weatherIntensity);
@@ -902,16 +1320,16 @@ export function WaterGame() {
       drawPlayer(ctx, cur.px, cur.py, cur.water, cur.maxWater, cur.bucketContaminated, cur.collectingFrom, cur.facing, cur.walkFrame);
       drawFloatTexts(ctx, cur.floatTexts);
 
-      // Heat shimmer post-process (drought) — copy canvas, redraw in sinusoidal strips
+      // Heat shimmer post-process (drought) — copy viewport, redraw in sinusoidal strips
       if (cur.weather === "drought" && cur.weatherIntensity > 0.15) {
-        shimmerCtx.clearRect(0, 0, WORLD_W, WORLD_H);
+        shimmerCtx.clearRect(0, 0, viewW, viewH);
         shimmerCtx.drawImage(canvas, 0, 0);
         const stripH = 3;
         const maxOff = cur.weatherIntensity * 7;
-        for (let sy = 0; sy < WORLD_H; sy += stripH) {
+        for (let sy = 0; sy < viewH; sy += stripH) {
           const xOff = Math.sin(sy * 0.06 + t * 6) * maxOff;
-          ctx.clearRect(0, sy, WORLD_W, stripH);
-          ctx.drawImage(shimmerCanvas, 0, sy, WORLD_W, stripH, xOff, sy, WORLD_W, stripH);
+          ctx.clearRect(camX, camY + sy, viewW, stripH);
+          ctx.drawImage(shimmerCanvas, 0, sy, viewW, stripH, camX + xOff, camY + sy, viewW, stripH);
         }
       }
 
@@ -926,24 +1344,29 @@ export function WaterGame() {
       // Lightning
       drawLightning(ctx, cur.lightningFlash);
 
+      ctx.restore();
+
       // Weather banner text
-      drawWeatherBanner(ctx, cur.weather, cur.weatherIntensity, t);
+      if (!isMobile) drawWeatherBanner(ctx, cur.weather, cur.weatherIntensity, t);
 
       // Delivery flash
       if (cur.deliveryFlash > 0) {
         ctx.save();
-        ctx.fillStyle = `rgba(90,200,80,${cur.deliveryFlash * 0.18})`; ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+        ctx.fillStyle = `rgba(90,200,80,${cur.deliveryFlash * 0.18})`; ctx.fillRect(0, 0, viewW, viewH);
         ctx.font = "13px 'Press Start 2P', monospace"; ctx.fillStyle = `rgba(245,200,66,${cur.deliveryFlash})`; ctx.textAlign = "center";
-        ctx.fillText("WATER DELIVERED!", WORLD_W / 2, WORLD_H / 2 - 20); ctx.restore();
+        ctx.fillText("WATER DELIVERED!", viewW / 2, viewH / 2 - 20); ctx.restore();
       }
 
       // Game over
       if (cur.gameOver) {
-        ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-        ctx.save(); ctx.font = "20px 'Press Start 2P', monospace"; ctx.fillStyle = "#e84040"; ctx.textAlign = "center";
-        ctx.fillText("GAME OVER", WORLD_W / 2, WORLD_H / 2 - 30);
-        ctx.font = "10px 'Press Start 2P', monospace"; ctx.fillStyle = "#e8d5a3";
-        ctx.fillText(`Day ${cur.day}  ·  $${cur.money.toFixed(2)}  ·  Pop: ${cur.population}`, WORLD_W / 2, WORLD_H / 2 + 14); ctx.restore();
+        ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(0, 0, viewW, viewH);
+        const gameOverY = isMobile ? viewH * 0.64 : viewH / 2;
+        ctx.save(); ctx.font = "34px 'Press Start 2P', monospace"; ctx.fillStyle = CW.orange; ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", viewW / 2, gameOverY - 30);
+        ctx.font = "11px 'Press Start 2P', monospace"; ctx.fillStyle = CW.peach;
+        ctx.fillText("Cause of death: Health reached 0", viewW / 2, gameOverY + 6);
+        ctx.font = "10px 'Press Start 2P', monospace"; ctx.fillStyle = CW.cream;
+        ctx.fillText(`Day ${cur.day}  ·  $${cur.money.toFixed(2)}  ·  Pop: ${cur.population}`, viewW / 2, gameOverY + 30); ctx.restore();
       }
 
       const donationRate = cur.population * DONATION_PER_PERSON_PER_DAY;
@@ -962,25 +1385,195 @@ export function WaterGame() {
 
     animRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animRef.current);
-  }, []);
+  }, [isMobile, viewH, viewW]);
 
   return (
-    <div className="relative flex items-center justify-center w-full h-full" style={{ background: "#0d0804", minHeight: "100vh" }}>
-      <div className="relative" style={{ width: WORLD_W, height: WORLD_H, maxWidth: "100vw" }}>
-        <canvas ref={canvasRef} width={WORLD_W} height={WORLD_H} style={{ display: "block", imageRendering: "pixelated", border: "3px solid #5c4020", boxShadow: "0 0 40px rgba(0,0,0,0.8)" }} />
+    <div className="relative flex items-center justify-center w-full h-full" style={{ background: CW.black, minHeight: "100vh", touchAction: "none" }}>
+      <div style={{ width: isMobile ? "min(96vw, 560px)" : "min(100vw, 1200px)" }}>
+      <div className="relative" style={{ width: "100%", aspectRatio: `${viewW} / ${viewH}` }}>
+        <canvas ref={canvasRef} width={viewW} height={viewH} style={{ width: "100%", height: "100%", display: "block", imageRendering: "pixelated", border: `3px solid ${CW.navy}`, boxShadow: "0 0 40px rgba(0,0,0,0.8)" }} />
         <GameHUD
           health={uiState.health} waterCollected={uiState.water} maxWater={uiState.maxWater}
           bucketContaminated={uiState.bucketContaminated} hasFilter={uiState.hasFilter}
           moneyRaised={uiState.money} donationRate={uiState.donationRate}
           population={uiState.population} day={uiState.day} timeOfDay={uiState.timeOfDay}
-          onNewDay={handleNewDay} gameOver={uiState.gameOver}
+          onNewDay={handleNewDay} onResetGame={handleResetGame} gameOver={uiState.gameOver}
           nearShop={uiState.nearShop} onOpenShop={() => setShopOpen(v => !v)}
           buildMode={uiState.buildMode} onToggleBuild={() => { stateRef.current.buildMode = !stateRef.current.buildMode; }}
           wellCost={WELL_COST} weather={uiState.weather} weatherIntensity={uiState.weatherIntensity}
+          isMobile={isMobile}
+          healthDrainMultiplier={DIRTY_STATUS_HEALTH_MULTIPLIER}
         />
-        {shopOpen && (
-          <UpgradeShop money={uiState.money} purchasedUpgrades={uiState.purchasedUpgrades} onBuy={handleBuy} onClose={() => setShopOpen(false)} />
+        {isMobile && !shopOpen && !uiState.gameOver && (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                left: 14,
+                bottom: 14,
+                width: 124,
+                height: 124,
+                borderRadius: "50%",
+                background: "rgba(20,12,5,0.48)",
+                border: "2px solid rgba(232,213,163,0.35)",
+                boxShadow: "0 0 10px rgba(0,0,0,0.45)",
+                touchAction: "none",
+                pointerEvents: "auto",
+                zIndex: 18,
+              }}
+              onPointerDown={updateStick}
+              onPointerMove={(e) => {
+                if (e.buttons !== 0 || e.pointerType === "touch") updateStick(e);
+              }}
+              onPointerUp={releaseStick}
+              onPointerCancel={releaseStick}
+              onPointerLeave={(e) => {
+                if (e.pointerType === "mouse") releaseStick();
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: 52,
+                  height: 52,
+                  borderRadius: "50%",
+                  transform: `translate(calc(-50% + ${stickPos.x}px), calc(-50% + ${stickPos.y}px))`,
+                  background: "rgba(245,200,66,0.65)",
+                  border: "2px solid rgba(245,200,66,0.9)",
+                  boxShadow: "0 0 8px rgba(245,200,66,0.5)",
+                }}
+              />
+            </div>
+            <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", flexDirection: "column", gap: 8, zIndex: 18, pointerEvents: "auto" }}>
+              <button
+                onClick={() => { if (stateRef.current.nearShop) setShopOpen(v => !v); }}
+                disabled={!uiState.nearShop}
+                style={{
+                  fontFamily: "'Press Start 2P', monospace",
+                  fontSize: "9px",
+                  padding: "10px 12px",
+                  borderRadius: "6px",
+                  border: `2px solid ${uiState.nearShop ? CW.yellow : CW.navy}`,
+                  background: uiState.nearShop ? CW.navy : "rgba(26,26,26,0.92)",
+                  color: uiState.nearShop ? CW.yellow : CW.blue,
+                }}
+              >
+                SHOP
+              </button>
+              <button
+                onClick={() => { stateRef.current.buildMode = !stateRef.current.buildMode; }}
+                style={{
+                  fontFamily: "'Press Start 2P', monospace",
+                  fontSize: "8px",
+                  padding: "10px 12px",
+                  borderRadius: "6px",
+                  border: `2px solid ${uiState.buildMode ? CW.yellow : CW.blue}`,
+                  background: uiState.buildMode ? CW.navy : "#10263A",
+                  color: uiState.buildMode ? CW.yellow : CW.blue,
+                }}
+              >
+                {uiState.buildMode ? "BUILD ON" : "BUILD"}
+              </button>
+              {uiState.buildMode && (
+                <button
+                  onClick={placeWellAtPlayer}
+                  style={{
+                    fontFamily: "'Press Start 2P', monospace",
+                    fontSize: "8px",
+                    padding: "10px 12px",
+                    borderRadius: "6px",
+                    border: `2px solid ${CW.yellow}`,
+                    background: CW.navy,
+                    color: CW.yellow,
+                  }}
+                >
+                  PLACE
+                </button>
+              )}
+            </div>
+          </>
         )}
+        {shopOpen && (
+          <UpgradeShop money={uiState.money} purchasedUpgrades={uiState.purchasedUpgrades} onBuy={handleBuy} onClose={() => setShopOpen(false)} isMobile={isMobile} />
+        )}
+        {weekSummary && (
+          <div
+            onClick={handleContinueAfterWeekSummary}
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,0,0,0.76)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 40,
+              pointerEvents: "auto",
+            }}
+          >
+            <div style={{
+              width: isMobile ? "84%" : "420px",
+              border: `3px solid ${CW.yellow}`,
+              background: "rgba(15,15,15,0.92)",
+              padding: isMobile ? "14px 12px" : "18px 16px",
+              textAlign: "center",
+              boxShadow: "0 0 24px rgba(0,0,0,0.65)",
+            }}>
+              <div style={{ fontFamily: "'Press Start 2P', monospace", fontSize: isMobile ? "10px" : "11px", color: CW.yellow, marginBottom: "10px" }}>
+                WEEK {weekSummary.week} COMPLETE!
+              </div>
+              <div style={{ fontFamily: "'VT323', monospace", fontSize: isMobile ? "20px" : "24px", color: CW.cream, marginBottom: "10px" }}>
+                Great work keeping water moving.
+              </div>
+              <div style={{ fontFamily: "'VT323', monospace", fontSize: isMobile ? "18px" : "20px", color: CW.blue, lineHeight: 1.4 }}>
+                +{weekSummary.populationGain} population<br />
+                ${weekSummary.fundsRaised.toFixed(2)} raised<br />
+                {Math.round(weekSummary.goodWaterCollected)} good water<br />
+                {Math.round(weekSummary.badWaterCollected)} bad water
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleContinueAfterWeekSummary(); }}
+                style={{
+                  marginTop: "12px",
+                  fontFamily: "'Press Start 2P', monospace",
+                  fontSize: "7px",
+                  padding: "8px 12px",
+                  borderRadius: "4px",
+                  border: `2px solid ${CW.blue}`,
+                  background: CW.navy,
+                  color: CW.blue,
+                  cursor: "pointer",
+                }}
+              >
+                CONTINUE
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{
+        marginTop: "8px",
+        height: isMobile ? "52px" : "60px",
+        border: `3px solid ${CW.navy}`,
+        borderTop: `2px solid ${CW.blue}`,
+        background: "linear-gradient(180deg, rgba(26,26,26,0.98) 0%, rgba(14,14,14,0.98) 100%)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        boxShadow: "0 0 24px rgba(0,0,0,0.45)",
+      }}>
+        <div style={{
+          fontFamily: "'Avenir Next', 'Trebuchet MS', sans-serif",
+          fontWeight: 800,
+          letterSpacing: "0.12em",
+          fontSize: isMobile ? "18px" : "24px",
+          textTransform: "uppercase",
+        }}>
+          <span style={{ color: CW.yellow }}>Water</span>
+          <span style={{ color: CW.cream, margin: "0 8px" }}>Source</span>
+        </div>
+      </div>
       </div>
     </div>
   );

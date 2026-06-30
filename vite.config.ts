@@ -19,6 +19,12 @@ function figmaAssetResolver() {
 export default defineConfig(({ command }) => ({
   // GitHub Pages serves this project from /Water-Source/ in production.
   base: command === 'build' ? '/Water-Source/' : '/',
+  server: {
+    // Bind all interfaces so the dev server works reliably in Codespaces.
+    host: true,
+    // Required for GitHub Codespaces port forwarding domains.
+    allowedHosts: ['.app.github.dev', '.tunnelmole.net'],
+  },
   plugins: [
     figmaAssetResolver(),
     // The React and Tailwind plugins are both required for Make, even if
