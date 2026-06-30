@@ -30,13 +30,14 @@ const DROUGHT_WELL_DRAIN_RATE = 0.75;
 const RAIN_RIVER_FILL_RATE = 0.25;
 const DROUGHT_RIVER_DRAIN_RATE = 0.5;
 
-const SFX_DROUGHT_WIND = "/sfx/dragon-studio-eerie-wind-478386.mp3";
-const SFX_RAIN_THUNDER = "/sfx/freesound_community-thunder-during-rainstorm-1-72024.mp3";
-const SFX_WELL_FILL = "/sfx/a_a2005-flowing-water-345171.wav";
-const SFX_CLEAN_DELIVERY = "/sfx/universfield-water-splash-02-352021.mp3";
-const SFX_DIRTY_HOOK = "/sfx/warp3.wav";
-const SFX_DIRTY_DELIVERY = "/sfx/freesound_community-dirt-pound-107984.mp3";
-const SFX_BG_MUSIC = "/sfx/freesound_community-slow-ethereal-sequencer-music-fragment-50247.mp3";
+const SFX_BASE = `${import.meta.env.BASE_URL}sfx/`;
+const SFX_DROUGHT_WIND = `${SFX_BASE}dragon-studio-eerie-wind-478386.mp3`;
+const SFX_RAIN_THUNDER = `${SFX_BASE}freesound_community-thunder-during-rainstorm-1-72024.mp3`;
+const SFX_WELL_FILL = `${SFX_BASE}a_a2005-flowing-water-345171.wav`;
+const SFX_CLEAN_DELIVERY = `${SFX_BASE}universfield-water-splash-02-352021.mp3`;
+const SFX_DIRTY_HOOK = `${SFX_BASE}warp3.wav`;
+const SFX_DIRTY_DELIVERY = `${SFX_BASE}freesound_community-dirt-pound-107984.mp3`;
+const SFX_BG_MUSIC = `${SFX_BASE}freesound_community-slow-ethereal-sequencer-music-fragment-50247.mp3`;
 
 const CW = {
   yellow: "#FFC907",
